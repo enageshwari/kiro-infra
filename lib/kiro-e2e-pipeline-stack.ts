@@ -36,7 +36,8 @@ export class KiroE2EPipelineStack extends cdk.Stack {
     // ── ECR repo for Playwright runner image ───────────────────────────────
     const e2eRepository = new ecr.Repository(this, 'KiroE2ERepo', {
       repositoryName: 'kiro-e2e',
-      removalPolicy:  cdk.RemovalPolicy.RETAIN,
+      removalPolicy:  cdk.RemovalPolicy.DESTROY,
+      emptyOnDelete:  true,
       lifecycleRules: [{ maxImageCount: 5, description: 'Keep last 5 e2e runner images' }],
     });
 

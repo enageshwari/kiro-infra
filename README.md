@@ -285,13 +285,69 @@ aws logs get-log-events \
 
 ---
 
-## Teardown
+## Teardown (cost saving)
 
 ```bash
-# Destroy all stacks (ECR repos are RETAIN — delete manually if needed)
+cd kiro-infra
 npx cdk destroy --all
-
-# Manually delete ECR repos if desired
-aws ecr delete-repository --repository-name kiro-app --force
-aws ecr delete-repository --repository-name kiro-e2e --force
 ```
+
+All resources are deleted — ECR repos (and all images), ECS services, ALB, VPC,
+Lambda, API Gateway, CloudWatch log groups. Nothing left running, nothing incurring cost.
+
+> The most expensive resources are NAT gateway (~$32/mo) and ALB (~$16/mo).
+> Everything else is negligible or free tier.
+
+---
+
+## Restore from scratch
+
+Everything is recreatable from CDK in one sequence of commands:
+
+```bash
+# 1. Deploy all infra
+cd kiro-infra
+npm install
+npx cdk deploy --all --require-approval never
+
+# 2. Get the new stack outputs (ALB URL, target group ARN, trigger URL, role ARNs)
+aws cloudformation describe-stacks --stack-name KiroAppStack \
+  --query 'Stacks[0].Outputs' --output table
+
+aws cloudformation describe-stacks --stack-name KiroE2EPipelineStack \
+  --query 'Stacks[0].Outputs' --output table
+
+aws cloudformation describe-stacks --stack-name KiroGitHubOidcStack \
+  --query 'Stacks[0].Outputs' --output table
+
+# 3. Retrieve the new API Gateway API key value
+aws apigateway get-api-keys \
+  --include-values \
+  --query 'items[?name==`kiro-gha-trigger-key`].value' \
+  --output text
+
+# 4. Update GHA secrets with new values
+#    (ALB URL and target group ARN change on every fresh deploy)
+gh secret set APP_URL          --repo enageshwari/kiro-app --body "<AppUrl output>"
+gh secret set TARGET_GROUP_ARN --repo enageshwari/kiro-app --body "<TargetGroupArn output>"
+gh secret set E2E_TRIGGER_URL  --repo enageshwari/kiro-app --body "<E2ETriggerUrl output>"
+gh secret set E2E_API_KEY      --repo enageshwari/kiro-app --body "<api key value>"
+gh secret set AWS_ROLE_ARN     --repo enageshwari/kiro-app --body "<KiroAppRoleArn output>"
+gh secret set AWS_ROLE_ARN     --repo enageshwari/kiro-e2e --body "<KiroE2ERoleArn output>"
+
+# 5. Push kiro-e2e to rebuild and push the runner image to the new ECR repo
+cd ../kiro-e2e
+git commit --allow-empty -m "ci: rebuild runner image after restore"
+git push
+
+# 6. Push kiro-app to trigger the first full pipeline run
+cd ../kiro-app
+git commit --allow-empty -m "ci: first run after infra restore"
+git push
+# Watch: github.com/enageshwari/kiro-app/actions
+```
+
+> **Why secrets need updating after restore:** ALB and API Gateway are recreated
+> with new DNS names and ARNs each time. OIDC role ARNs stay the same (same role name)
+> so `AWS_ROLE_ARN` only needs updating if the account changes.
+> `E2E_API_KEY` changes because the API Gateway resource is new.

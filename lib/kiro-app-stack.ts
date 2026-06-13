@@ -42,8 +42,14 @@ export class KiroAppStack extends cdk.Stack {
     });
 
     // ── ECR repo ───────────────────────────────────────────────────────────
-    // Import if already exists (retained from prior deploy), create otherwise.
-    // We manage lifecycle separately so the repo never gets destroyed.
+    // Using fromRepositoryName because the repo was created outside this stack
+    // (initially imported). On full teardown, delete the repo manually:
+    //   aws ecr delete-repository --repository-name kiro-app --force
+    // On restore, cdk deploy recreates it via the Repository construct below.
+    //
+    // Switch between these two lines:
+    //   - First deploy on fresh account: use `new ecr.Repository`
+    //   - Subsequent deploys (repo exists): use `fromRepositoryName`
     this.appRepository = ecr.Repository.fromRepositoryName(
       this, 'KiroAppRepo', 'kiro-app',
     );
