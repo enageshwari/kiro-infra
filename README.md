@@ -203,6 +203,24 @@ GHA job starts
 
 ---
 
+## ECR permissions for docker buildx
+
+Standard `docker push` only needs write permissions. `docker buildx` with registry
+cache also reads existing layers for cache resolution, requiring additional permissions:
+
+```
+ecr:BatchGetImage           — read existing image manifests for cache hits
+ecr:GetDownloadUrlForLayer  — download layer blobs for cache comparison
+ecr:DescribeRepositories    — verify repo exists before pushing
+ecr:ListImages              — enumerate existing tags
+```
+
+All four are granted to both OIDC roles in `KiroGitHubOidcStack`. If you see
+`403 Forbidden` on a manifest HEAD request during `docker buildx`, these permissions
+are missing from the role.
+
+---
+
 ## Security group design
 
 The ALB and Fargate tasks each have their own security group. Traffic flow:
