@@ -108,6 +108,39 @@ export class KiroE2EPipelineStack extends cdk.Stack {
       ],
     }));
 
+    // Grant Lambda permission to write results to CloudWatch
+    triggerLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+        'logs:DescribeLogStreams',
+      ],
+      resources: [
+        `${e2eLogGroup.logGroupArn}`,
+        `${e2eLogGroup.logGroupArn}:*`,
+      ],
+    }));
+
+    // Grant the e2e Fargate task execution role permission to pull from ECR
+    e2eTaskDef.addToExecutionRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ecr:GetAuthorizationToken',
+        'ecr:BatchCheckLayerAvailability',
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:BatchGetImage',
+      ],
+      resources: ['*'],
+    }));
+
+    // Grant the e2e Fargate task execution role permission to write to CloudWatch
+    e2eTaskDef.addToExecutionRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'logs:CreateLogStream',
+        'logs:PutLogEvents',
+      ],
+      resources: [`${e2eLogGroup.logGroupArn}:*`],
+    }));
+
     // ── API Gateway — POST /run-e2e ────────────────────────────────────────
     // Integration timeout set to 29s max for API GW; Lambda is async via proxy.
     // NOTE: Because API Gateway has a hard 29-second timeout, the Lambda is
