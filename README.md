@@ -176,11 +176,15 @@ aws apigateway get-api-keys --include-values \
 ## Teardown and restore
 
 ```bash
-# Teardown — deletes everything, stops all costs
+# Default teardown — destroys all billable resources, keeps CDKToolkit (~$0)
 cd kiro-infra
 bash scripts/teardown.sh
 
-# Restore — recreates everything from scratch
+# Full teardown — zero AWS footprint (requires cdk bootstrap on next restore)
+bash scripts/teardown.sh --all
+
+# Restore — auto-detects if bootstrap is needed, recreates everything,
+#            prints all GHA secret update commands
 bash scripts/restore.sh
 ```
 
@@ -190,16 +194,22 @@ bash scripts/restore.sh
 |---|---|---|
 | NAT Gateway | ~$32 | ✅ Yes |
 | ALB | ~$16 | ✅ Yes |
-| Fargate tasks | ~$0 (only runs during tests) | ✅ Yes |
+| Fargate tasks | ~$0 (runs only during tests) | ✅ Yes |
 | Lambda | Free tier | ✅ Yes |
 | API Gateway | Free tier | ✅ Yes |
-| ECR images | ~$0.10/GB | ✅ Yes (teardown.sh) |
+| ECR images | ~$0.10/GB | ✅ Yes (`teardown.sh`) |
 | CloudWatch logs | Minimal | ✅ Yes |
-| IAM roles / OIDC | **Free** | ❌ Stays (intentional — free) |
-| CDK bootstrap S3 bucket | ~$0 | ❌ Manual if needed |
+| IAM roles / OIDC | **Free** | ✅ Yes (in `--all` mode) |
+| CDKToolkit S3 bucket | **~$0** | ✅ Yes (`teardown.sh --all`) |
 
-> After `teardown.sh`, only IAM roles (free) and the CDK bootstrap S3 bucket
-> (~$0) remain. Everything that costs money is gone.
+**Default teardown** (`bash scripts/teardown.sh`):
+Destroys everything billable. Keeps CDKToolkit bootstrap — saves running
+`cdk bootstrap` on the next restore. Cost after default teardown: **~$0**.
+
+**Full teardown** (`bash scripts/teardown.sh --all`):
+Destroys everything including CDKToolkit. Zero AWS footprint.
+Requires `cdk bootstrap` before next `scripts/restore.sh` — the restore
+script detects this automatically and bootstraps if needed.
 
 ---
 
