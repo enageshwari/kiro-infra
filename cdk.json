@@ -1,0 +1,12 @@
+{
+  "app": "npx ts-node bin/kiro-infra.ts",
+  "watch": {
+    "include": ["**"],
+    "exclude": ["README.md", "cdk*.json", "dist", "node_modules", "cdk.out"]
+  },
+  "context": {
+    "@aws-cdk/aws-lambda:recognizeLayerVersion": true,
+    "@aws-cdk/core:checkSecretUsage": true,
+    "@aws-cdk/aws-ecs:arnFormatIncludesClusterName": true
+  }
+}
