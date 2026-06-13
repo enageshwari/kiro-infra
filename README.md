@@ -1,20 +1,20 @@
 # kiro-infra
 
-AWS CDK infrastructure for the kiro-app service and E2E test pipeline.
+AWS CDK infrastructure for kiro-app and the E2E test pipeline.
+**Fully reproducible** — `cdk destroy --all` tears everything down,
+`scripts/restore.sh` brings it all back.
 
-> **Note:** All three repos are public. No credentials are stored in any repo.
-> AWS authentication uses OIDC — GitHub Actions exchanges a short-lived JWT
-> for temporary AWS credentials. No `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY`
-> are stored anywhere.
+> All three repos are public. No credentials stored anywhere.
+> Authentication uses OIDC — temporary STS credentials, scoped to repo + branch.
 
 ---
 
-## Repositories in this system
+## Repositories
 
 | Repo | Purpose |
 |---|---|
-| [kiro-app](https://github.com/enageshwari/kiro-app) | Express app, unit tests, CI pipeline |
-| [kiro-e2e](https://github.com/enageshwari/kiro-e2e) | Playwright E2E tests, runner Dockerfile |
+| [kiro-app](https://github.com/enageshwari/kiro-app) | Express app, unit tests, CI |
+| [kiro-e2e](https://github.com/enageshwari/kiro-e2e) | Playwright E2E tests |
 | [kiro-infra](https://github.com/enageshwari/kiro-infra) | CDK infrastructure (this repo) |
 
 ---
@@ -22,123 +22,141 @@ AWS CDK infrastructure for the kiro-app service and E2E test pipeline.
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────────┐
-│  AWS Account: 080147880517  /  Region: us-east-1                     │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────┐     │
-│  │  KiroAppStack                                               │     │
-│  │                                                             │     │
-│  │  VPC (2 AZs, 1 NAT GW)                                     │     │
-│  │  ├── Public subnets  → ALB                                  │     │
-│  │  └── Private subnets → ECS Fargate tasks                    │     │
-│  │                                                             │     │
-│  │  ECR: kiro-app          ECS Cluster: kiro-cluster           │     │
-│  │  ALB: kiro-app (port 80)                                    │     │
-│  │  ECS Service: kiro-app  (desiredCount managed by GHA)       │     │
-│  │  CW Log group: /ecs/kiro-app                                │     │
-│  └─────────────────────────────────────────────────────────────┘     │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────┐     │
-│  │  KiroE2EPipelineStack                                       │     │
-│  │                                                             │     │
-│  │  ECR: kiro-e2e                                              │     │
-│  │  ECS Task Def: kiro-e2e (2 vCPU / 2GB, Playwright runner)  │     │
-│  │  Lambda: kiro-trigger-e2e  (15 min timeout)                 │     │
-│  │  API Gateway: POST /run-e2e  (API key protected)            │     │
-│  │  CW Log group: /ecs/kiro-e2e                                │     │
-│  └─────────────────────────────────────────────────────────────┘     │
-│                                                                      │
-│  ┌─────────────────────────────────────────────────────────────┐     │
-│  │  KiroGitHubOidcStack                                        │     │
-│  │                                                             │     │
-│  │  IAM OIDC Provider: token.actions.githubusercontent.com     │     │
-│  │  IAM Role: kiro-app-gha-role  (ECR push, ECS update, CW)   │     │
-│  │  IAM Role: kiro-e2e-gha-role  (ECR push for runner image)   │     │
-│  └─────────────────────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  AWS  (us-east-1)                                                        │
+│                                                                          │
+│  ┌─── KiroAppStack ────────────────────────────────────────────────┐     │
+│  │                                                                 │     │
+│  │  VPC  ┌─ Public subnets ──── ALB (port 80, internet-facing)    │     │
+│  │  2 AZ │                       │                                │     │
+│  │       └─ Private subnets ─── ECS Fargate  kiro-app             │     │
+│  │                                └─ ECR: kiro-app                │     │
+│  │                                └─ CW:  /ecs/kiro-app           │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                          │
+│  ┌─── KiroE2EPipelineStack ────────────────────────────────────────┐     │
+│  │                                                                 │     │
+│  │  API Gateway  POST /run-e2e  (API key required)                 │     │
+│  │       │                                                         │     │
+│  │       ▼ async invoke                                            │     │
+│  │  Lambda  kiro-trigger-e2e  (15 min timeout)                     │     │
+│  │       │  - ECS RunTask                                          │     │
+│  │       │  - polls until STOPPED                                  │     │
+│  │       │  - writes result to CloudWatch                          │     │
+│  │       ▼                                                         │     │
+│  │  Fargate task  kiro-e2e  (2 vCPU, 2GB)                         │     │
+│  │       └─ ECR: kiro-e2e  (Playwright runner image)              │     │
+│  │       └─ CW:  /ecs/kiro-e2e                                    │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+│                                                                          │
+│  ┌─── KiroGitHubOidcStack ─────────────────────────────────────────┐     │
+│  │  OIDC Provider: token.actions.githubusercontent.com             │     │
+│  │  kiro-app-gha-role  → ECR push, ECS update, CW read            │     │
+│  │  kiro-e2e-gha-role  → ECR push (runner image)                  │     │
+│  └─────────────────────────────────────────────────────────────────┘     │
+└──────────────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## Highlights
+
+### Security
+- **OIDC authentication** — no long-lived AWS keys stored in GitHub secrets.
+  IAM roles are scoped to `repo:enageshwari/<repo>:ref:refs/heads/main` —
+  tokens from any other repo or branch are rejected by AWS STS.
+- **Least-privilege IAM** — each role grants only what its workflow needs.
+  `docker buildx` needs extra ECR read permissions vs plain `docker push` —
+  these are explicitly listed (see ECR permissions section below).
+- **API key on E2E webhook** — API Gateway requires `x-api-key` header.
+  Throttled at 10 req/s, burst 5 — prevents runaway Fargate task costs.
+- **Non-root Fargate tasks** — app container runs as a non-root user.
+
+### Reliability
+- **`alb.connections.allowTo()`** — sets ALB→task SG rules bidirectionally.
+  CDK's ALB construct has no outbound rules by default — this is a common
+  gotcha that causes silent health check timeouts.
+- **`desiredCount=0` on first deploy** — ECS service created with no tasks,
+  no ALB attachment. GHA wires everything on first push. Clean separation
+  between infra creation and app deployment.
+- **ECS execution role** — explicitly grants ECR pull + CloudWatch log write.
+  Many tutorials omit this, causing `CannotPullContainerError` on first run.
+- **Lambda CW permissions** — explicitly grants `CreateLogStream` + `PutLogEvents`
+  so the result JSON is always written even if the default role is restrictive.
+
+### Reproducibility
+- **Full teardown in one command:** `scripts/teardown.sh`
+- **Full restore in one command:** `scripts/restore.sh`
+- **All resources codified** — no manual AWS console steps after bootstrap.
 
 ---
 
 ## CDK Stacks
 
-| Stack | Key resources |
+| Stack | Resources |
 |---|---|
-| `KiroAppStack` | VPC, ECS cluster, ECR (kiro-app), ALB + target group, Fargate service (desiredCount=0 initially), CW log group `/ecs/kiro-app` |
-| `KiroE2EPipelineStack` | ECR (kiro-e2e), Fargate task def (2GB for Playwright + browsers), Lambda trigger, API Gateway + API key, CW log group `/ecs/kiro-e2e` |
-| `KiroGitHubOidcStack` | IAM OIDC provider, `kiro-app-gha-role`, `kiro-e2e-gha-role` — scoped to specific repos + main branch |
+| `KiroAppStack` | VPC, ECS cluster, ECR (kiro-app), ALB + TG, Fargate service, CW `/ecs/kiro-app` |
+| `KiroE2EPipelineStack` | ECR (kiro-e2e), Fargate task def (2GB), Lambda, API GW + key, CW `/ecs/kiro-e2e` |
+| `KiroGitHubOidcStack` | IAM OIDC provider, kiro-app-gha-role, kiro-e2e-gha-role |
 
 ---
 
-## Setup — commands run in order
+## Setup — first time
 
-### 1. Prerequisites
+### Prerequisites
 
 ```bash
-# Install AWS CLI v2
+# AWS CLI v2
 curl "https://awscli.amazonaws.com/AWSCLIV2.pkg" -o /tmp/AWSCLIV2.pkg
 sudo installer -pkg /tmp/AWSCLIV2.pkg -target /
 
-# Install Node.js 20+
-# (download from https://nodejs.org or use nvm)
+# Node.js 20+  — https://nodejs.org
 
-# Install CDK CLI
+# CDK CLI
 npm install -g aws-cdk
 
-# Configure AWS credentials (admin access needed for bootstrap only)
+# Configure credentials (admin access for bootstrap only)
 aws configure
-# Enter: Access Key ID, Secret Access Key, region (us-east-1)
-
-# Verify identity
-aws sts get-caller-identity
+aws sts get-caller-identity  # verify
 ```
 
-### 2. Bootstrap CDK (one-time per account/region)
+### Bootstrap (one-time per account/region)
 
 ```bash
 cdk bootstrap aws://<ACCOUNT_ID>/us-east-1
 ```
 
-### 3. Install dependencies and deploy
+### Deploy
 
 ```bash
 cd kiro-infra
 npm install
-
-# Deploy app infra + OIDC roles first
-npx cdk deploy KiroAppStack KiroGitHubOidcStack --require-approval never
-
-# Deploy E2E pipeline (depends on KiroAppStack outputs)
-npx cdk deploy KiroE2EPipelineStack --require-approval never
+npx cdk deploy --all --require-approval never
 ```
 
-### 4. Retrieve stack outputs
+### Get outputs and set GHA secrets
 
 ```bash
-# App stack outputs (APP_URL, ECR repo, target group ARN)
+# App stack
 aws cloudformation describe-stacks --stack-name KiroAppStack \
-  --query 'Stacks[0].Outputs' --output table
+  --query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' --output table
 
-# E2E pipeline outputs (trigger URL, ECR repo)
+# E2E pipeline
 aws cloudformation describe-stacks --stack-name KiroE2EPipelineStack \
-  --query 'Stacks[0].Outputs' --output table
+  --query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' --output table
 
-# OIDC role ARNs
+# OIDC roles
 aws cloudformation describe-stacks --stack-name KiroGitHubOidcStack \
-  --query 'Stacks[0].Outputs' --output table
+  --query 'Stacks[0].Outputs[*].{Key:OutputKey,Value:OutputValue}' --output table
 
-# API Gateway API key (not in CFN outputs — retrieve separately)
-aws apigateway get-api-keys \
-  --include-values \
-  --query 'items[?name==`kiro-gha-trigger-key`].value' \
-  --output text
+# API key (not in CFN outputs)
+aws apigateway get-api-keys --include-values \
+  --query 'items[?name==`kiro-gha-trigger-key`].value' --output text
 ```
 
-### 5. Set GitHub Actions secrets
+**kiro-app secrets:**
 
-**kiro-app repo** — `github.com/enageshwari/kiro-app/settings/secrets/actions`
-
-| Secret | CDK output / source |
+| Secret | Source |
 |---|---|
 | `AWS_ROLE_ARN` | `KiroGitHubOidcStack.KiroAppRoleArn` |
 | `APP_URL` | `KiroAppStack.AppUrl` |
@@ -146,208 +164,121 @@ aws apigateway get-api-keys \
 | `E2E_TRIGGER_URL` | `KiroE2EPipelineStack.E2ETriggerUrl` |
 | `E2E_API_KEY` | `aws apigateway get-api-keys --include-values` |
 
-**kiro-e2e repo** — `github.com/enageshwari/kiro-e2e/settings/secrets/actions`
+**kiro-e2e secrets:**
 
-| Secret | CDK output / source |
+| Secret | Source |
 |---|---|
 | `AWS_ROLE_ARN` | `KiroGitHubOidcStack.KiroE2ERoleArn` |
 | `ECR_REPOSITORY_E2E` | `KiroE2EPipelineStack.E2EEcrRepo` |
 
-### 6. Push kiro-e2e runner image (first time)
+---
 
-The Playwright runner image must exist in ECR before kiro-app CI can run E2E tests.
-Push to `kiro-e2e` main to trigger the image build:
+## Teardown and restore
 
 ```bash
-cd kiro-e2e
-git commit --allow-empty -m "ci: build initial runner image"
-git push
-# watch: github.com/enageshwari/kiro-e2e/actions
+# Teardown — deletes everything, stops all costs
+cd kiro-infra
+bash scripts/teardown.sh
+
+# Restore — recreates everything from scratch
+bash scripts/restore.sh
 ```
 
-### 7. Trigger the full pipeline
+### What costs money and what doesn't
 
-Push any change to `kiro-app` main:
-```bash
-cd kiro-app
-git commit --allow-empty -m "ci: trigger first full pipeline run"
-git push
-# watch: github.com/enageshwari/kiro-app/actions
-```
+| Resource | Monthly cost | Destroyed by teardown? |
+|---|---|---|
+| NAT Gateway | ~$32 | ✅ Yes |
+| ALB | ~$16 | ✅ Yes |
+| Fargate tasks | ~$0 (only runs during tests) | ✅ Yes |
+| Lambda | Free tier | ✅ Yes |
+| API Gateway | Free tier | ✅ Yes |
+| ECR images | ~$0.10/GB | ✅ Yes (teardown.sh) |
+| CloudWatch logs | Minimal | ✅ Yes |
+| IAM roles / OIDC | **Free** | ❌ Stays (intentional — free) |
+| CDK bootstrap S3 bucket | ~$0 | ❌ Manual if needed |
+
+> After `teardown.sh`, only IAM roles (free) and the CDK bootstrap S3 bucket
+> (~$0) remain. Everything that costs money is gone.
 
 ---
 
-## OIDC authentication — how it works
+## OIDC — how it works
 
 ```
 GHA job starts
-  │
-  ├─ requests JWT from GitHub OIDC provider
-  │  JWT contains: repo, branch, actor, sha
-  │
-  ├─ aws-actions/configure-aws-credentials
-  │  exchanges JWT for temporary STS credentials
-  │  (valid 1 hour, auto-expires)
-  │
-  └─ IAM role trust policy validates:
-     - aud = sts.amazonaws.com
-     - sub = repo:enageshwari/kiro-app:ref:refs/heads/main
-     Only tokens from this exact repo + branch are accepted
+  → requests JWT from GitHub OIDC endpoint
+     JWT payload: { repo, branch, actor, sha, ... }
+  → aws-actions/configure-aws-credentials
+     POST to AWS STS: AssumeRoleWithWebIdentity
+     IAM validates:
+       aud = sts.amazonaws.com
+       sub = repo:enageshwari/kiro-app:ref:refs/heads/main
+     Returns: temporary credentials (1 hour TTL)
+  → GHA uses credentials for ECR, ECS, CloudWatch
+     Credentials expire automatically — nothing to rotate
 ```
-
-**Why OIDC over access keys:**
-- Zero stored secrets — nothing to rotate or leak
-- Credentials expire automatically after 1 hour
-- Trust is scoped to a specific repo and branch
-- Revoking access = update the IAM role trust policy, not rotate a key
-
----
-
-## ECR permissions for docker buildx
-
-Standard `docker push` only needs write permissions. `docker buildx` with registry
-cache also reads existing layers for cache resolution, requiring additional permissions:
-
-```
-ecr:BatchGetImage           — read existing image manifests for cache hits
-ecr:GetDownloadUrlForLayer  — download layer blobs for cache comparison
-ecr:DescribeRepositories    — verify repo exists before pushing
-ecr:ListImages              — enumerate existing tags
-```
-
-All four are granted to both OIDC roles in `KiroGitHubOidcStack`. If you see
-`403 Forbidden` on a manifest HEAD request during `docker buildx`, these permissions
-are missing from the role.
 
 ---
 
 ## Security group design
 
-The ALB and Fargate tasks each have their own security group. Traffic flow:
+```
+Internet  →  ALB SG  (inbound :80 open)
+                │
+                │  alb.connections.allowTo() sets both:
+                │  ALB SG egress  → Task SG :3000
+                │  Task SG ingress ← ALB SG :3000
+                ▼
+          Task SG  (outbound all — ECR pull, CW logs)
+```
+
+**Gotcha:** CDK's `ApplicationLoadBalancer` creates the ALB SG with no outbound
+rules. Using VPC CIDR as the task SG inbound source is not sufficient — the ALB
+sends health checks from its own SG, not a predictable IP. `alb.connections.allowTo()`
+is the correct CDK pattern for bidirectional SG wiring.
+
+---
+
+## ECR permissions for docker buildx
+
+`docker buildx` needs read permissions beyond what plain `docker push` requires:
 
 ```
-Internet → ALB SG (inbound :80 0.0.0.0/0)
-         → Task SG (inbound :3000 from ALB SG only)
-Task SG  → outbound all (ECR pull, CloudWatch logs, internet)
-ALB SG   → outbound :3000 to Task SG (health checks + traffic forwarding)
+ecr:BatchGetImage           — read manifests for cache resolution
+ecr:GetDownloadUrlForLayer  — download layers for cache comparison
+ecr:DescribeRepositories    — verify repo before pushing
+ecr:ListImages              — enumerate existing tags
 ```
 
-**Key gotcha:** CDK's `ApplicationLoadBalancer` construct creates an ALB SG with
-**no outbound rules by default**. This causes ALB health checks to time out silently
-even though the task is running and the inbound rule on the task SG is correct.
+Missing these → `403 Forbidden` on manifest HEAD request during buildx push.
+All four are granted to both OIDC roles in `KiroGitHubOidcStack`.
 
-Fix — use `alb.connections.allowTo()` which sets both directions in one call:
-```typescript
-alb.connections.allowTo(
-  this.appSecurityGroup,
-  ec2.Port.tcp(3000),
-  'ALB to kiro-app task port 3000',
-);
-```
-This adds ALB SG egress → task SG port 3000, and task SG ingress ← ALB SG port 3000.
-Using VPC CIDR (`10.0.0.0/16`) as the inbound source is **not sufficient** — the ALB
-sends health checks from its own SG, not from a predictable IP range.
+---
 
 ## Why desiredCount=0 on first deploy
 
-AWS ECS does not allow attaching a load balancer to a service at creation time
-with `desiredCount=0`, and the service cannot pull an image that doesn't exist yet.
+AWS ECS rejects a service creation with `desiredCount=0` if a load balancer is
+attached — and the service can't start tasks until an image exists in ECR.
 
-**Solution:** the CDK stack creates the ECS service with `desiredCount=0` and
-**no load balancer attachment**. On the first `kiro-app` push to `main`, GHA:
-1. Pushes the Docker image to ECR
-2. Registers a new task definition revision with the real image
-3. Calls `aws ecs update-service --desired-count 1 --load-balancers ...`
-   to wire the ALB and start the app
-
-Subsequent pushes just update the image and force a rolling deploy.
+**Solution:** CDK creates the service with `desiredCount=0` and no load balancer.
+GHA handles both on first push: pushes the image, registers a new task def revision,
+then calls `update-service --desired-count 1 --load-balancers ...`.
 
 ---
 
 ## CloudWatch logs
 
-| Log group | Stream prefix | Contents |
-|---|---|---|
-| `/ecs/kiro-app` | `kiro-app/` | Express app stdout/stderr |
-| `/ecs/kiro-e2e` | `playwright/` | Playwright test output |
-| `/ecs/kiro-e2e` | `e2e-results/<runId>` | Structured `{ result, taskArn, exitCode }` |
-
 ```bash
-# Tail live Playwright output
+# Live Playwright output
 aws logs tail /ecs/kiro-e2e --log-stream-name-prefix playwright --follow
 
-# Read structured E2E result for a specific GHA run
+# Structured E2E result for a GHA run
 aws logs get-log-events \
   --log-group-name /ecs/kiro-e2e \
   --log-stream-name "e2e-results/<github-run-id>" \
   --query 'events[*].message' --output text | jq .
+
+# App logs
+aws logs tail /ecs/kiro-app --follow
 ```
-
----
-
-## Teardown (cost saving)
-
-```bash
-cd kiro-infra
-npx cdk destroy --all
-```
-
-All resources are deleted — ECR repos (and all images), ECS services, ALB, VPC,
-Lambda, API Gateway, CloudWatch log groups. Nothing left running, nothing incurring cost.
-
-> The most expensive resources are NAT gateway (~$32/mo) and ALB (~$16/mo).
-> Everything else is negligible or free tier.
-
----
-
-## Restore from scratch
-
-Everything is recreatable from CDK in one sequence of commands:
-
-```bash
-# 1. Deploy all infra
-cd kiro-infra
-npm install
-npx cdk deploy --all --require-approval never
-
-# 2. Get the new stack outputs (ALB URL, target group ARN, trigger URL, role ARNs)
-aws cloudformation describe-stacks --stack-name KiroAppStack \
-  --query 'Stacks[0].Outputs' --output table
-
-aws cloudformation describe-stacks --stack-name KiroE2EPipelineStack \
-  --query 'Stacks[0].Outputs' --output table
-
-aws cloudformation describe-stacks --stack-name KiroGitHubOidcStack \
-  --query 'Stacks[0].Outputs' --output table
-
-# 3. Retrieve the new API Gateway API key value
-aws apigateway get-api-keys \
-  --include-values \
-  --query 'items[?name==`kiro-gha-trigger-key`].value' \
-  --output text
-
-# 4. Update GHA secrets with new values
-#    (ALB URL and target group ARN change on every fresh deploy)
-gh secret set APP_URL          --repo enageshwari/kiro-app --body "<AppUrl output>"
-gh secret set TARGET_GROUP_ARN --repo enageshwari/kiro-app --body "<TargetGroupArn output>"
-gh secret set E2E_TRIGGER_URL  --repo enageshwari/kiro-app --body "<E2ETriggerUrl output>"
-gh secret set E2E_API_KEY      --repo enageshwari/kiro-app --body "<api key value>"
-gh secret set AWS_ROLE_ARN     --repo enageshwari/kiro-app --body "<KiroAppRoleArn output>"
-gh secret set AWS_ROLE_ARN     --repo enageshwari/kiro-e2e --body "<KiroE2ERoleArn output>"
-
-# 5. Push kiro-e2e to rebuild and push the runner image to the new ECR repo
-cd ../kiro-e2e
-git commit --allow-empty -m "ci: rebuild runner image after restore"
-git push
-
-# 6. Push kiro-app to trigger the first full pipeline run
-cd ../kiro-app
-git commit --allow-empty -m "ci: first run after infra restore"
-git push
-# Watch: github.com/enageshwari/kiro-app/actions
-```
-
-> **Why secrets need updating after restore:** ALB and API Gateway are recreated
-> with new DNS names and ARNs each time. OIDC role ARNs stay the same (same role name)
-> so `AWS_ROLE_ARN` only needs updating if the account changes.
-> `E2E_API_KEY` changes because the API Gateway resource is new.
