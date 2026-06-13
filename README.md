@@ -203,6 +203,33 @@ GHA job starts
 
 ---
 
+## Security group design
+
+The ALB and Fargate tasks each have their own security group. Traffic flow:
+
+```
+Internet → ALB SG (inbound :80 0.0.0.0/0)
+         → Task SG (inbound :3000 from ALB SG only)
+Task SG  → outbound all (ECR pull, CloudWatch logs, internet)
+ALB SG   → outbound :3000 to Task SG (health checks + traffic forwarding)
+```
+
+**Key gotcha:** CDK's `ApplicationLoadBalancer` construct creates an ALB SG with
+**no outbound rules by default**. This causes ALB health checks to time out silently
+even though the task is running and the inbound rule on the task SG is correct.
+
+Fix — use `alb.connections.allowTo()` which sets both directions in one call:
+```typescript
+alb.connections.allowTo(
+  this.appSecurityGroup,
+  ec2.Port.tcp(3000),
+  'ALB to kiro-app task port 3000',
+);
+```
+This adds ALB SG egress → task SG port 3000, and task SG ingress ← ALB SG port 3000.
+Using VPC CIDR (`10.0.0.0/16`) as the inbound source is **not sufficient** — the ALB
+sends health checks from its own SG, not from a predictable IP range.
+
 ## Why desiredCount=0 on first deploy
 
 AWS ECS does not allow attaching a load balancer to a service at creation time
