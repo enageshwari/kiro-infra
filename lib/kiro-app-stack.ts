@@ -61,11 +61,9 @@ export class KiroAppStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    this.appSecurityGroup.addIngressRule(
-      ec2.Peer.ipv4(this.vpc.vpcCidrBlock),
-      ec2.Port.tcp(3000),
-      'ALB to kiro-app container',
-    );
+    // ALB security group — created by the ALB construct below.
+    // We add the ingress rule after ALB creation so we can reference its SG.
+    // The rule allows ALB → task on port 3000 for health checks and traffic.
 
     // ── CloudWatch log group ───────────────────────────────────────────────
     const appLogGroup = new logs.LogGroup(this, 'KiroAppLogs', {
@@ -106,6 +104,17 @@ export class KiroAppStack extends cdk.Stack {
       vpc:            this.vpc,
       internetFacing: true,
     });
+
+    // Allow ALB → task on port 3000 (health checks + traffic forwarding).
+    // Both directions must be explicitly set:
+    //   1. ALB SG outbound → task SG port 3000
+    //   2. Task SG inbound ← ALB SG port 3000
+    // CDK's ALB construct defaults to no outbound rules — must add explicitly.
+    alb.connections.allowTo(
+      this.appSecurityGroup,
+      ec2.Port.tcp(3000),
+      'ALB to kiro-app task port 3000',
+    );
 
     const targetGroup = new elbv2.ApplicationTargetGroup(this, 'KiroTG', {
       vpc:         this.vpc,
