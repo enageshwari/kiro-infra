@@ -71,6 +71,11 @@ export class KiroGitHubOidcStack extends cdk.Stack {
         'ecr:InitiateLayerUpload',
         'ecr:PutImage',
         'ecr:UploadLayerPart',
+        // Required by docker buildx for cache reads and manifest resolution
+        'ecr:BatchGetImage',
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:DescribeRepositories',
+        'ecr:ListImages',
       ],
       resources: [
         `arn:aws:ecr:${this.region}:${this.account}:repository/kiro-app`,
@@ -144,6 +149,11 @@ export class KiroGitHubOidcStack extends cdk.Stack {
         'ecr:InitiateLayerUpload',
         'ecr:PutImage',
         'ecr:UploadLayerPart',
+        // Required by docker buildx for cache reads and manifest resolution
+        'ecr:BatchGetImage',
+        'ecr:GetDownloadUrlForLayer',
+        'ecr:DescribeRepositories',
+        'ecr:ListImages',
       ],
       resources: [
         `arn:aws:ecr:${this.region}:${this.account}:repository/kiro-e2e`,
